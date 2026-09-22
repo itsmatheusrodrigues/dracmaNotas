@@ -1,0 +1,993 @@
+from pathlib import Path
+from datetime import datetime
+from openpyxl import load_workbook
+from playwright.sync_api import (
+    Playwright,
+    sync_playwright,
+    TimeoutError as PlaywrightTimeoutError,
+)
+
+
+# ============================================================
+# CONFIGURAÇÕES
+# ============================================================
+
+URL_DRACMA = "https://dracma.sdasystems.org/accounts-payable/create?entityId=322"
+
+BASE_DIR = Path(__file__).resolve().parent
+
+PASTA_CACHE = BASE_DIR / "cache_dracma"
+
+ARQUIVO_EXCEL = BASE_DIR / "Pasta1.xlsx"
+ABA_EXCEL = "Planilha1"
+
+PASTA_NOTAS = BASE_DIR / "notas"
+
+
+# ============================================================
+# XPATHS DO DRACMA
+# ============================================================
+
+XPATH_TIPO_DOCUMENTO = (
+    "xpath=/html/body/navigation/div/main/div/router-view/router-view/"
+    "compose/div[2]/div[1]/basic-section/div/form/div[2]/"
+    "dropdown-wrapper/div/div/input"
+)
+
+XPATH_EMITENTE = (
+    "xpath=/html/body/navigation/div/main/div/router-view/router-view/"
+    "compose/div[2]/div[1]/basic-section/div/form/div[3]/div/"
+    "person-search/div/div/dropdown-wrapper/div/div/input"
+)
+
+XPATH_DATA_EMISSAO = (
+    "xpath=/html/body/navigation/div/main/div/router-view/router-view/"
+    "compose/div[2]/div[1]/basic-section/div/form/div[4]/div[1]/"
+    "div[1]/date-picker/div/input"
+)
+
+XPATH_NUMERO = (
+    "xpath=/html/body/navigation/div/main/div/router-view/router-view/"
+    "compose/div[2]/div[1]/basic-section/div/form/div[4]/div[1]/"
+    "div[2]/input"
+)
+
+XPATH_VALOR = (
+    "xpath=/html/body/navigation/div/main/div/router-view/router-view/"
+    "compose/div[2]/div[1]/basic-section/div/form/div[4]/div[2]/"
+    "div[1]/currency-input2/div/input"
+)
+
+XPATH_FINALIDADE = (
+    "xpath=/html/body/navigation/div/main/div/router-view/router-view/"
+    "compose/div[2]/div[1]/basic-section/div/form/div[4]/div[4]/textarea"
+)
+
+XPATH_ADICIONAR_ANEXO = (
+    "xpath=/html/body/navigation/div/main/div/router-view/router-view/"
+    "compose/div[2]/div[2]/div[2]/div[2]/attachments/compose/"
+    "div/div[1]/div"
+)
+
+XPATH_SALVAR = (
+    "xpath=/html/body/navigation/div/main/div/router-view/router-view/"
+    "compose/div[2]/div[1]/basic-section/div/div/div[2]/button"
+)
+
+XPATH_CRIAR_CATEGORIA_E_CENTRO_CUSTO = (
+    "xpath=/html/body/navigation/div/main/div/router-view/router-view/"
+    "compose/div[3]/div[1]/ap-cost-div/div[1]/div/button"
+)
+
+XPATH_CATEGORIA = (
+    "xpath=/html/body/navigation/div/main/div/router-view/router-view/"
+    "compose/div[3]/div[1]/ap-cost-div/div[2]/compose/div/div/div[1]/"
+    "div[1]/dropdown-wrapper/div/div/input"
+)
+
+XPATH_CENTRO_CUSTO = (
+    "xpath=/html/body/navigation/div/main/div/router-view/router-view/"
+    "compose/div[3]/div[1]/ap-cost-div/div[2]/compose/div/div/div[1]/"
+    "div[2]/dropdown-wrapper/div/div/input"
+)
+
+XPATH_SALVAR_CATEGORIA_E_CENTRO_CUSTO = (
+    "xpath=/html/body/navigation/div/main/div/router-view/router-view/"
+    "compose/div[3]/div[1]/ap-cost-div/div[1]/div/div/button[4]"
+)
+
+XPATH_FORMA_PAGAMENTO = (
+    "xpath=/html/body/navigation/div/main/div/router-view/router-view/"
+    "compose/div[3]/div[2]/payment/div/div/compose/div/div/div[1]/"
+    "payment-fields/div/compose/div[1]/dropdown-wrapper/div/div/input"
+)
+
+XPATH_CODIGO_PAGAMENTO = (
+    "xpath=/html/body/navigation/div/main/div/router-view/router-view/"
+    "compose/div[3]/div[2]/payment/div/div/compose/div/div/div[1]/"
+    "payment-fields/div/compose/div[2]/div[2]/div[1]/div/input"
+)
+
+XPATH_SALVAR_PAGAMENTO = (
+    "xpath=/html/body/navigation/div/main/div/router-view/router-view/"
+    "compose/div[3]/div[2]/payment/div/div/compose/payment-header/"
+    "div/div[1]/button[4]"
+)
+
+XPATH_ENVIAR = (
+    "xpath=/html/body/navigation/div/main/div/router-view/router-view/"
+    "compose/div[4]/button[2]"
+)
+
+
+# ============================================================
+# EXCEL
+# ============================================================
+
+COLUNAS_NECESSARIAS = [
+    "Nome do Documento",
+    "Tipo de Documento",
+    "Emitente",
+    "Data de Emissão",
+    "Número",
+    "Valor",
+    "Finalidade",
+    "Categorias de Gasto",
+    "Centros de Custo",
+    "Forma de Pagamento",
+    "Campo de Pagamento",
+]
+
+
+def obter_mapa_colunas(ws) -> dict:
+    colunas = {}
+
+    for celula in ws[1]:
+        if celula.value is not None:
+            colunas[str(celula.value).strip()] = celula.column
+
+    return colunas
+
+
+def obter_linhas_com_documentos() -> list[int]:
+    """
+    Retorna todas as linhas que possuem valor na coluna
+    'Nome do Documento'.
+
+    Exemplo:
+        linha 2 -> F10.pdf
+        linha 3 -> F11.pdf
+        linha 4 -> F12.pdf
+    """
+
+    if not ARQUIVO_EXCEL.exists():
+        raise FileNotFoundError(
+            f"Arquivo Excel não encontrado: {ARQUIVO_EXCEL}"
+        )
+
+    wb = load_workbook(
+        ARQUIVO_EXCEL,
+        data_only=True,
+    )
+
+    if ABA_EXCEL not in wb.sheetnames:
+        wb.close()
+        raise ValueError(
+            f"A aba '{ABA_EXCEL}' não existe no arquivo."
+        )
+
+    ws = wb[ABA_EXCEL]
+    colunas = obter_mapa_colunas(ws)
+
+    if "Nome do Documento" not in colunas:
+        wb.close()
+        raise ValueError(
+            "A coluna 'Nome do Documento' não existe no Excel."
+        )
+
+    coluna_nome = colunas["Nome do Documento"]
+
+    linhas = []
+
+    for numero_linha in range(2, ws.max_row + 1):
+        valor = ws.cell(
+            row=numero_linha,
+            column=coluna_nome,
+        ).value
+
+        if valor is not None and str(valor).strip():
+            linhas.append(numero_linha)
+
+    wb.close()
+
+    return linhas
+
+
+def ler_documento_excel(numero_linha: int) -> dict:
+    if not ARQUIVO_EXCEL.exists():
+        raise FileNotFoundError(
+            f"Arquivo Excel não encontrado: {ARQUIVO_EXCEL}"
+        )
+
+    wb = load_workbook(
+        ARQUIVO_EXCEL,
+        data_only=True,
+    )
+
+    if ABA_EXCEL not in wb.sheetnames:
+        wb.close()
+        raise ValueError(
+            f"A aba '{ABA_EXCEL}' não existe no arquivo."
+        )
+
+    ws = wb[ABA_EXCEL]
+    colunas = obter_mapa_colunas(ws)
+
+    faltando = [
+        nome
+        for nome in COLUNAS_NECESSARIAS
+        if nome not in colunas
+    ]
+
+    if faltando:
+        wb.close()
+        raise ValueError(
+            "Faltam colunas no Excel: "
+            + ", ".join(faltando)
+        )
+
+    dados = {}
+
+    for nome_coluna in COLUNAS_NECESSARIAS:
+        dados[nome_coluna] = ws.cell(
+            row=numero_linha,
+            column=colunas[nome_coluna],
+        ).value
+
+    wb.close()
+
+    if not dados["Nome do Documento"]:
+        raise ValueError(
+            f"A linha {numero_linha} não possui Nome do Documento."
+        )
+
+    return dados
+
+
+# ============================================================
+# FORMATAÇÃO
+# ============================================================
+
+def texto_seguro(valor) -> str:
+    if valor is None:
+        return ""
+
+    return str(valor).strip()
+
+
+def formatar_data_para_dracma(valor) -> str:
+    if valor is None:
+        return ""
+
+    if isinstance(valor, datetime):
+        return valor.strftime("%d/%m/%Y")
+
+    texto = str(valor).strip()
+
+    for formato in (
+        "%d/%m/%Y",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+    ):
+        try:
+            return datetime.strptime(
+                texto,
+                formato,
+            ).strftime("%d/%m/%Y")
+        except ValueError:
+            pass
+
+    return texto
+
+
+def formatar_valor_para_dracma(valor) -> str:
+    if valor is None:
+        return ""
+
+    if isinstance(valor, (int, float)):
+        return f"{valor:.2f}".replace(".", ",")
+
+    texto = str(valor).strip()
+
+    if texto.startswith("R$"):
+        texto = texto.replace("R$", "").strip()
+
+    return texto
+
+
+# ============================================================
+# LOGS / UTILITÁRIOS PLAYWRIGHT
+# ============================================================
+
+def etapa(nome: str):
+    print()
+    print("-" * 60)
+    print(f"[ETAPA] {nome}")
+    print("-" * 60)
+
+
+def clicar(
+    page,
+    locator,
+    nome: str,
+    timeout: int = 30000,
+):
+    print(f"[AGUARDANDO] {nome}")
+
+    locator.wait_for(
+        state="visible",
+        timeout=timeout,
+    )
+
+    locator.scroll_into_view_if_needed()
+    locator.click()
+
+    print(f"[OK] Clique: {nome}")
+
+
+def preencher_campo(
+    page,
+    locator,
+    valor,
+    nome_campo: str,
+    pressionar_enter: bool = False,
+):
+    valor = texto_seguro(valor)
+
+    print(f"[AGUARDANDO] {nome_campo}")
+
+    locator.wait_for(
+        state="visible",
+        timeout=30000,
+    )
+
+    locator.scroll_into_view_if_needed()
+    locator.click()
+    locator.fill(valor)
+
+    if pressionar_enter:
+        locator.press("Enter")
+
+    print(f"[OK] {nome_campo}: {valor}")
+
+
+def preencher_dropdown(
+    page,
+    locator,
+    valor,
+    nome_campo: str,
+    espera_ms: int = 1200,
+):
+    valor = texto_seguro(valor)
+
+    if not valor:
+        print(
+            f"[AVISO] {nome_campo} está vazio no Excel. "
+            "Campo ignorado."
+        )
+        return False
+
+    print(f"[AGUARDANDO] {nome_campo}")
+
+    locator.wait_for(
+        state="visible",
+        timeout=30000,
+    )
+
+    locator.scroll_into_view_if_needed()
+    locator.click()
+    locator.fill(valor)
+
+    page.wait_for_timeout(espera_ms)
+
+    locator.press("ArrowDown")
+    locator.press("Enter")
+
+    print(f"[OK] {nome_campo}: {valor}")
+
+    return True
+
+
+def anexar_pdf(page, nome_documento: str):
+    caminho_pdf = PASTA_NOTAS / str(nome_documento)
+
+    if not caminho_pdf.exists():
+        raise FileNotFoundError(
+            f"PDF não encontrado: {caminho_pdf}"
+        )
+
+    botao_anexo = page.locator(
+        XPATH_ADICIONAR_ANEXO
+    )
+
+    print("[AGUARDANDO] Botão Adicionar Anexo")
+
+    botao_anexo.wait_for(
+        state="visible",
+        timeout=30000,
+    )
+
+    botao_anexo.scroll_into_view_if_needed()
+
+    with page.expect_file_chooser(
+        timeout=10000,
+    ) as file_chooser_info:
+        botao_anexo.click()
+
+    file_chooser_info.value.set_files(
+        str(caminho_pdf)
+    )
+
+    print(
+        f"[OK] PDF anexado: {caminho_pdf.name}"
+    )
+
+
+def manter_navegador_aberto(context):
+    print()
+    print("=" * 60)
+    print("NAVEGADOR CONTINUA ABERTO")
+    print("=" * 60)
+    print('Digite "fechar" para encerrar.')
+    print("=" * 60)
+
+    while True:
+        comando = input(
+            "\nComando: "
+        ).strip().lower()
+
+        if comando == "fechar":
+            print()
+            print("Fechando navegador...")
+            break
+
+        print(
+            'Comando não reconhecido. '
+            'Digite "fechar" para encerrar.'
+        )
+
+    context.close()
+
+
+# ============================================================
+# PROCESSAR UM DOCUMENTO
+# ============================================================
+
+def processar_documento(
+    page,
+    numero_linha: int,
+    indice_atual: int,
+    total_documentos: int,
+):
+    """
+    Executa TODO o fluxo para uma linha do Excel.
+    Ao final, clica em XPATH_ENVIAR.
+    """
+
+    dados = ler_documento_excel(
+        numero_linha=numero_linha
+    )
+
+    nome_documento = texto_seguro(
+        dados["Nome do Documento"]
+    )
+
+    tipo_documento = texto_seguro(
+        dados["Tipo de Documento"]
+    )
+
+    emitente = texto_seguro(
+        dados["Emitente"]
+    )
+
+    data_emissao = formatar_data_para_dracma(
+        dados["Data de Emissão"]
+    )
+
+    numero = texto_seguro(
+        dados["Número"]
+    )
+
+    valor = formatar_valor_para_dracma(
+        dados["Valor"]
+    )
+
+    finalidade = texto_seguro(
+        dados["Finalidade"]
+    )
+
+    categoria = texto_seguro(
+        dados["Categorias de Gasto"]
+    )
+
+    centro_custo = texto_seguro(
+        dados["Centros de Custo"]
+    )
+
+    forma_pagamento = texto_seguro(
+        dados["Forma de Pagamento"]
+    )
+
+    codigo_pagamento = texto_seguro(
+        dados["Campo de Pagamento"]
+    )
+
+    print()
+    print("=" * 70)
+    print(
+        f"DOCUMENTO {indice_atual}/{total_documentos} "
+        f"- LINHA {numero_linha}"
+    )
+    print("=" * 70)
+    print(f"Documento: {nome_documento}")
+    print(f"Tipo de Documento: {tipo_documento}")
+    print(f"Emitente: {emitente}")
+    print(f"Data de Emissão: {data_emissao}")
+    print(f"Número: {numero}")
+    print(f"Valor: {valor}")
+    print(f"Finalidade: {finalidade}")
+    print(f"Categoria de Gasto: {categoria}")
+    print(f"Centro de Custo: {centro_custo}")
+    print(f"Forma de Pagamento: {forma_pagamento}")
+    print(f"Campo de Pagamento: {codigo_pagamento}")
+    print("=" * 70)
+
+    # ========================================================
+    # ABRIR/REABRIR FORMULÁRIO PARA ESTE DOCUMENTO
+    # ========================================================
+
+    etapa("ABRIR FORMULÁRIO")
+
+    page.goto(
+        URL_DRACMA,
+        wait_until="domcontentloaded",
+        timeout=60000,
+    )
+
+    page.locator(
+        XPATH_TIPO_DOCUMENTO
+    ).wait_for(
+        state="visible",
+        timeout=300000,
+    )
+
+    print("[OK] Formulário carregado.")
+
+    # ========================================================
+    # DADOS PRINCIPAIS
+    # ========================================================
+
+    etapa("DADOS PRINCIPAIS")
+
+    preencher_dropdown(
+        page,
+        page.locator(XPATH_TIPO_DOCUMENTO),
+        tipo_documento,
+        "Tipo de Documento",
+    )
+
+    preencher_dropdown(
+        page,
+        page.locator(XPATH_EMITENTE),
+        emitente,
+        "Emitente",
+    )
+
+    preencher_campo(
+        page,
+        page.locator(XPATH_DATA_EMISSAO),
+        data_emissao,
+        "Data de Emissão",
+    )
+
+    preencher_campo(
+        page,
+        page.locator(XPATH_NUMERO),
+        numero,
+        "Número",
+    )
+
+    preencher_campo(
+        page,
+        page.locator(XPATH_VALOR),
+        valor,
+        "Valor",
+    )
+
+    preencher_campo(
+        page,
+        page.locator(XPATH_FINALIDADE),
+        finalidade,
+        "Finalidade",
+    )
+
+    # ========================================================
+    # ANEXO
+    # ========================================================
+    page.wait_for_timeout(5000)
+    etapa("ANEXO")
+
+    anexar_pdf(
+        page,
+        nome_documento,
+    )
+
+    # ========================================================
+    # SALVAR DADOS PRINCIPAIS
+    # ========================================================
+    page.wait_for_timeout(5000)
+
+    etapa("SALVAR DADOS PRINCIPAIS")
+
+    page.wait_for_timeout(5000)
+
+    clicar(
+        page,
+        page.locator(XPATH_SALVAR),
+        "Salvar dados principais",
+    )
+
+    print(
+        "[AGUARDANDO] 5 segundos para o Dracma "
+        "carregar Categoria/Centro de Custo..."
+    )
+
+    page.wait_for_timeout(5000)
+
+    print("[OK] Espera concluída.")
+
+    # ========================================================
+    # CRIAR CATEGORIA + CENTRO DE CUSTO
+    # ========================================================
+
+    etapa("CRIAR CATEGORIA E CENTRO DE CUSTO")
+
+    # Mantive a espera que você colocou no código que funcionou.
+    page.wait_for_timeout(5000)
+
+    try:
+        clicar(
+            page,
+            page.locator(
+                XPATH_CRIAR_CATEGORIA_E_CENTRO_CUSTO
+            ),
+            "Criar Categoria/Centro de Custo",
+            timeout=3000,
+        )
+
+        print(
+            "[AGUARDANDO] 1 segundo para os campos "
+            "de Categoria/Centro de Custo aparecerem..."
+        )
+
+        page.wait_for_timeout(3000)
+
+    except PlaywrightTimeoutError:
+        print(
+            "[AVISO] Não foi possível clicar em "
+            "XPATH_CRIAR_CATEGORIA_E_CENTRO_CUSTO."
+        )
+        print(
+            "[CONTINUANDO] Pulando diretamente para XPATH_CATEGORIA."
+        )
+
+    # ========================================================
+    # CATEGORIA
+    # ========================================================
+
+    etapa("CATEGORIA DE GASTO")
+    page.wait_for_timeout(3000)
+    preencher_dropdown(
+        page=page,
+        locator=page.locator(
+            XPATH_CATEGORIA
+        ),
+        valor=categoria,
+        nome_campo="Categoria de Gasto",
+    )
+
+    # ========================================================
+    # CENTRO DE CUSTO
+    # ========================================================
+
+    etapa("CENTRO DE CUSTO")
+    page.wait_for_timeout(3000)
+    preencher_dropdown(
+        page=page,
+        locator=page.locator(
+            XPATH_CENTRO_CUSTO
+        ),
+        valor=centro_custo,
+        nome_campo="Centro de Custo",
+    )
+
+    # ========================================================
+    # SALVAR CATEGORIA + CENTRO DE CUSTO
+    # ========================================================
+    
+    etapa("SALVAR CATEGORIA E CENTRO DE CUSTO")
+
+    clicar(
+        page,
+        page.locator(
+            XPATH_SALVAR_CATEGORIA_E_CENTRO_CUSTO
+        ),
+        "Salvar Categoria/Centro de Custo",
+    )
+
+    print(
+        "[OK] Categoria e Centro de Custo salvos."
+    )
+
+    page.wait_for_timeout(1000)
+
+    # ========================================================
+    # PAGAMENTO
+    # ========================================================
+
+    etapa("PAGAMENTO")
+
+    preencher_dropdown(
+        page=page,
+        locator=page.locator(
+            XPATH_FORMA_PAGAMENTO
+        ),
+        valor=forma_pagamento,
+        nome_campo="Forma de Pagamento",
+    )
+
+    preencher_campo(
+        page=page,
+        locator=page.locator(
+            XPATH_CODIGO_PAGAMENTO
+        ),
+        valor=codigo_pagamento,
+        nome_campo="Campo de Pagamento",
+        pressionar_enter=True,
+    )
+
+    # ========================================================
+    # SALVAR PAGAMENTO
+    # ========================================================
+
+    etapa("SALVAR PAGAMENTO")
+
+    clicar(
+        page,
+        page.locator(
+            XPATH_SALVAR_PAGAMENTO
+        ),
+        "Salvar Pagamento",
+    )
+
+    page.wait_for_timeout(1000)
+
+    # ========================================================
+    # ENVIAR DOCUMENTO
+    # ========================================================
+
+    etapa("ENVIAR DOCUMENTO")
+
+    clicar(
+        page,
+        page.locator(
+            XPATH_ENVIAR
+        ),
+        "Enviar Documento",
+    )
+
+    print(
+        f"[OK] Documento enviado: {nome_documento}"
+    )
+
+    # Dá tempo para o Dracma concluir a ação antes do próximo loop.
+    page.wait_for_timeout(2000)
+
+
+# ============================================================
+# AUTOMAÇÃO PRINCIPAL
+# ============================================================
+
+def run(playwright: Playwright) -> None:
+    context = None
+
+    try:
+        # ====================================================
+        # DESCOBRIR TODOS OS DOCUMENTOS DO EXCEL
+        # ====================================================
+
+        linhas_documentos = obter_linhas_com_documentos()
+
+        if not linhas_documentos:
+            print(
+                "[AVISO] Nenhum documento encontrado no Excel."
+            )
+            return
+
+        total_documentos = len(
+            linhas_documentos
+        )
+
+        print()
+        print("=" * 70)
+        print("DRACMA - PROCESSAMENTO EM LOTE")
+        print("=" * 70)
+        print(
+            f"Total de documentos encontrados: "
+            f"{total_documentos}"
+        )
+        print(
+            f"Linhas do Excel: {linhas_documentos}"
+        )
+        print("=" * 70)
+
+        # ====================================================
+        # CACHE
+        # ====================================================
+
+        PASTA_CACHE.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+
+        # ====================================================
+        # NAVEGADOR COM CACHE
+        # ====================================================
+
+        context = playwright.chromium.launch_persistent_context(
+            user_data_dir=str(PASTA_CACHE),
+            headless=False,
+            no_viewport=True,
+            args=[
+                "--window-size=1920,1080",
+                "--window-position=0,0",
+            ],
+        )
+
+        if context.pages:
+            page = context.pages[0]
+        else:
+            page = context.new_page()
+
+        # ====================================================
+        # LOOP - TODOS OS DOCUMENTOS
+        # ====================================================
+
+        enviados = 0
+
+        for indice, numero_linha in enumerate(
+            linhas_documentos,
+            start=1,
+        ):
+            try:
+                processar_documento(
+                    page=page,
+                    numero_linha=numero_linha,
+                    indice_atual=indice,
+                    total_documentos=total_documentos,
+                )
+
+                enviados += 1
+
+                print()
+                print(
+                    f"[PROGRESSO] {enviados}/{total_documentos} "
+                    "documento(s) enviado(s)."
+                )
+
+                # Se ainda existe outro documento,
+                # o loop simplesmente volta ao início.
+                if indice < total_documentos:
+                    print()
+                    print(
+                        "[PRÓXIMO] Preparando próximo documento do Excel..."
+                    )
+
+                    page.wait_for_timeout(1000)
+
+            except PlaywrightTimeoutError as erro:
+                print()
+                print("=" * 70)
+                print(
+                    f"[ERRO] TIMEOUT NO DOCUMENTO DA LINHA {numero_linha}"
+                )
+                print("=" * 70)
+                print(erro)
+                print()
+                print(
+                    "[PARANDO] O lote foi interrompido para evitar "
+                    "que um documento parcialmente preenchido gere "
+                    "lançamentos incorretos."
+                )
+                print("=" * 70)
+
+                break
+
+            except Exception as erro:
+                print()
+                print("=" * 70)
+                print(
+                    f"[ERRO] DOCUMENTO DA LINHA {numero_linha}"
+                )
+                print("=" * 70)
+                print(
+                    f"Tipo do erro: {type(erro).__name__}"
+                )
+                print(
+                    f"Mensagem: {erro}"
+                )
+                print()
+                print(
+                    "[PARANDO] O lote foi interrompido para evitar "
+                    "lançamentos incorretos."
+                )
+                print("=" * 70)
+
+                break
+
+        # ====================================================
+        # RESUMO
+        # ====================================================
+
+        print()
+        print("=" * 70)
+        print("RESUMO DO PROCESSAMENTO")
+        print("=" * 70)
+        print(
+            f"Documentos encontrados no Excel: "
+            f"{total_documentos}"
+        )
+        print(
+            f"Documentos enviados nesta execução: "
+            f"{enviados}"
+        )
+
+        if enviados == total_documentos:
+            print(
+                "[OK] Todos os documentos do Excel foram processados."
+            )
+        else:
+            print(
+                "[AVISO] O processamento terminou antes de concluir "
+                "todos os documentos."
+            )
+
+        print("=" * 70)
+
+    except Exception as erro:
+        print()
+        print("=" * 70)
+        print("[ERRO] A AUTOMAÇÃO NÃO PÔDE SER INICIADA")
+        print("=" * 70)
+        print(
+            f"Tipo do erro: {type(erro).__name__}"
+        )
+        print(
+            f"Mensagem: {erro}"
+        )
+        print("=" * 70)
+
+    finally:
+        if context is not None:
+            manter_navegador_aberto(
+                context
+            )
+
+
+# ============================================================
+# EXECUÇÃO
+# ============================================================
+
+if __name__ == "__main__":
+    with sync_playwright() as playwright:
+        run(playwright)
