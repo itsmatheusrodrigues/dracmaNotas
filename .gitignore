@@ -1,0 +1,5 @@
+﻿cache_dracma/
+__pycache__/
+.vscode/
+.idea/
+*.log
